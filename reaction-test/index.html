@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Reaction Test</title>
+<style>
+  :root {
+    --bg: #2b87d1; --wait: #ce2636; --go: #4bdb6a; --early: #e8a33d;
+    --fg: #fff; --card: rgba(0,0,0,.18);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    color: var(--fg); background: var(--bg);
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  .screen { display: none; min-height: 100%; padding: 24px 16px;
+    flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  .screen.active { display: flex; }
+  h1 { font-size: clamp(2rem, 7vw, 3.5rem); margin: .2em 0; }
+  p  { font-size: clamp(1rem, 3.5vw, 1.3rem); margin: .4em 0; opacity: .95; }
+  .card { background: var(--card); border-radius: 14px; padding: 20px; width: 100%; max-width: 420px; text-align: left; }
+  label { display: block; font-weight: 600; margin: 14px 0 6px; }
+  input[type=number], select {
+    width: 100%; font-size: 1.1rem; padding: 10px 12px; border-radius: 8px; border: 0;
+  }
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; }
+  .hint { font-size: .85rem; opacity: .8; margin-top: 4px; }
+  button {
+    margin-top: 20px; width: 100%; font-size: 1.2rem; font-weight: 700; padding: 14px;
+    border: 0; border-radius: 10px; background: #fff; color: #1d5f96; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: #fff; border: 2px solid #fff; }
+  #test { cursor: pointer; }
+  #test.waiting { background: var(--wait); }
+  #test.go      { background: var(--go); }
+  #test.early   { background: var(--early); }
+  #test.ready   { background: var(--bg); }
+  .big { font-size: clamp(3rem, 14vw, 6rem); font-weight: 800; margin: .1em 0; }
+  .progress { position: fixed; top: 12px; left: 0; right: 0; font-weight: 600; opacity: .9; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  td, th { padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,.25); text-align: left; }
+  td:last-child, th:last-child { text-align: right; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
+  .stat { background: rgba(255,255,255,.12); border-radius: 10px; padding: 10px; text-align: center; }
+  .stat b { display: block; font-size: 1.5rem; }
+</style>
+</head>
+<body>
+
+<!-- Settings -->
+<section id="setup" class="screen active">
+  <h1>Reaction Test</h1>
+  <div class="card">
+    <label for="tries">Number of tries</label>
+    <input id="tries" type="number" min="1" max="100" value="5">
+
+    <label for="mode">Delay before "TAP!"</label>
+    <select id="mode">
+      <option value="random">Random between min and max</option>
+      <option value="fixed">Fixed</option>
+    </select>
+
+    <div class="row" id="randomRow">
+      <div>
+        <label for="minDelay">Min (seconds)</label>
+        <input id="minDelay" type="number" min="0.1" step="0.1" value="2">
+      </div>
+      <div>
+        <label for="maxDelay">Max (seconds)</label>
+        <input id="maxDelay" type="number" min="0.1" step="0.1" value="5">
+      </div>
+    </div>
+    <div id="fixedRow" style="display:none">
+      <label for="fixedDelay">Delay (seconds)</label>
+      <input id="fixedDelay" type="number" min="0.1" step="0.1" value="3">
+      <div class="hint">A fixed delay is predictable — people can anticipate it.</div>
+    </div>
+
+    <button id="startBtn">Start</button>
+  </div>
+</section>
+
+<!-- Test -->
+<section id="test" class="screen ready">
+  <div class="progress" id="progress"></div>
+  <div id="testMsg"></div>
+</section>
+
+<!-- Results -->
+<section id="results" class="screen">
+  <h1>Results</h1>
+  <div class="card">
+    <div class="stats">
+      <div class="stat">Average<b id="avg"></b></div>
+      <div class="stat">Median<b id="median"></b></div>
+      <div class="stat">Best<b id="best"></b></div>
+      <div class="stat">Worst<b id="worst"></b></div>
+    </div>
+    <div id="earlyCount" class="hint"></div>
+    <table>
+      <thead><tr><th>Try</th><th>Reaction</th></tr></thead>
+      <tbody id="resultRows"></tbody>
+    </table>
+    <button id="againBtn">Try again</button>
+    <button id="settingsBtn" class="secondary">Change settings</button>
+  </div>
+</section>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const screens = ['setup', 'test', 'results'];
+  const show = name => screens.forEach(s => $(s).classList.toggle('active', s === name));
+
+  let cfg, times, earlies, state, timer, goAt;
+  // state: 'ready' | 'waiting' | 'go' | 'result' | 'early'
+
+  $('mode').addEventListener('change', e => {
+    const fixed = e.target.value === 'fixed';
+    $('fixedRow').style.display = fixed ? '' : 'none';
+    $('randomRow').style.display = fixed ? 'none' : '';
+  });
+
+  function readSettings() {
+    const tries = Math.max(1, Math.min(100, parseInt($('tries').value, 10) || 1));
+    const mode = $('mode').value;
+    let min = parseFloat($('minDelay').value), max = parseFloat($('maxDelay').value);
+    const fixed = parseFloat($('fixedDelay').value);
+    if (mode === 'fixed') {
+      if (!(fixed > 0)) return alert('Enter a delay greater than 0.');
+      min = max = fixed;
+    } else {
+      if (!(min > 0) || !(max > 0)) return alert('Enter delays greater than 0.');
+      if (min > max) [min, max] = [max, min];
+    }
+    return { tries, minMs: min * 1000, maxMs: max * 1000 };
+  }
+
+  function setTest(cls, html) {
+    $('test').className = 'screen active ' + cls;
+    $('testMsg').innerHTML = html;
+    $('progress').textContent = `Try ${Math.min(times.length + 1, cfg.tries)} of ${cfg.tries}`;
+  }
+
+  function startSession() {
+    const s = readSettings();
+    if (!s) return;
+    cfg = s; times = []; earlies = 0;
+    show('test');
+    toReady();
+  }
+
+  function toReady() {
+    state = 'ready';
+    setTest('ready', '<h1>Tap to start</h1><p>When the screen turns green, tap as fast as you can.</p>');
+  }
+
+  function toWaiting() {
+    state = 'waiting';
+    setTest('waiting', '<div class="big">…</div><h1>Wait for green</h1>');
+    const delay = cfg.minMs + Math.random() * (cfg.maxMs - cfg.minMs);
+    timer = setTimeout(() => {
+      state = 'go';
+      setTest('go', '<div class="big">TAP!</div>');
+      goAt = performance.now();
+    }, delay);
+  }
+
+  function onTap(e) {
+    e.preventDefault();
+    const now = performance.now();
+    switch (state) {
+      case 'ready':
+        toWaiting(); break;
+      case 'waiting':
+        clearTimeout(timer);
+        earlies++;
+        state = 'early';
+        setTest('early', '<h1>Too soon!</h1><p>Tap to retry this attempt.</p>');
+        break;
+      case 'go': {
+        const ms = Math.round(now - goAt);
+        times.push(ms);
+        if (times.length >= cfg.tries) return showResults();
+        state = 'result';
+        setTest('ready', `<div class="big">${ms} ms</div><p>Tap to continue</p>`);
+        break;
+      }
+      case 'result':
+      case 'early':
+        toWaiting(); break;
+    }
+  }
+
+  function showResults() {
+    state = null;
+    const sorted = [...times].sort((a, b) => a - b);
+    const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+    const mid = sorted.length >> 1;
+    const median = sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    $('avg').textContent = avg + ' ms';
+    $('median').textContent = median + ' ms';
+    $('best').textContent = sorted[0] + ' ms';
+    $('worst').textContent = sorted[sorted.length - 1] + ' ms';
+    $('earlyCount').textContent = earlies ? `Early taps (not counted): ${earlies}` : '';
+    $('resultRows').innerHTML = times.map((t, i) => `<tr><td>#${i + 1}</td><td>${t} ms</td></tr>`).join('');
+    show('results');
+  }
+
+  // pointerdown fires on touch/mouse press, lower latency than click
+  $('test').addEventListener('pointerdown', onTap);
+  $('startBtn').addEventListener('click', startSession);
+  $('againBtn').addEventListener('click', startSession);
+  $('settingsBtn').addEventListener('click', () => show('setup'));
+})();
+</script>
+</body>
+</html>
